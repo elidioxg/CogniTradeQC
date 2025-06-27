@@ -13,19 +13,18 @@ from enumerators import (TrainingFrequency, SignalCheckFrequency,
 from ai_models import GetModelMLPClassifier
 #endregion
 
-
 BENCHMARK = "QTEC"
 RESOLUTION = Resolution.HOUR
 
 # Risk Management
-TRAILING_STOP_RISK = 0.1 # (0 = disabled)
+TRAILING_STOP_RISK = 0 # (0 = disabled)
 MAX_UNPNL_PROFIT = 0 # Take Profit (0 = disabled)
 MAX_DRAWDOWN = 0 # Stop Loss (0 = disabled)
 MAX_DRAWDOWN_PORTFOLIO = 0 # (0 = disabled)
 
 # Portfolio Construction
-PORTFOLIO_CONSTRUCTOR = PortfolioConstructor.ACCUMULATIVE_INSIGHT
-MAX_HOLDINGS = 0.05
+PORTFOLIO_CONSTRUCTOR = PortfolioConstructor.INSIGHT_WEIGHTING
+MAX_HOLDINGS = 0.2
 LEVERAGE = 1
 
 # Orders
@@ -33,22 +32,28 @@ ORDER_EXECUTION = OrderExecutionType.IMMEDIATE
 
 # Training
 TRAINING_FREQUENCY = TrainingFrequency.DAILY
-STOPS_TARGET = 0.01 # TP and SL target to train the model
 STOPS_CHECK_TARGET = 2 # How many bars to check TP and SL target
+STOPS_TARGET = 0.01 # TP and SL target to train the model
+
+# Training Strong Signals
+STOPS_TARGET_STRONG = 0.02 # TP and SL target to train the model
+STRONG_SIGNAL_WEIGHT_MULTIPLIER = 1.5
 
 # Signal
 SIGNAL_FREQUENCY = SignalCheckFrequency.AFTER_MARKET_OPEN
-CONFIDENCE_CUTOFF = 1
-SIGNAL_TOLERANCE = 0.01
-SIGNAL_EXTREME = 0.02
+CONFIDENCE_CUTOFF = 0.5
+
+# Indicator Category Model Classification
+INDICATOR_CATEGORY_B = 0.01
+INDICATOR_CATEGORY_C = 0.02
 
 # Signals with Opened Positions from Same Symbol
-SIGNAL_SAME_DIRECTION = SignalOnSameDirection.EMMIT_IF_NOT_PROFITABLE
-SIGNAL_OPPOSITE_DIRECTION = SignalOnOppositeDirection.EMMIT_SIGNAL
+SIGNAL_SAME_DIRECTION = SignalOnSameDirection.EMMIT_IF_STRONG_SIGNAL_AND_NOT_PROFITABLE
+SIGNAL_OPPOSITE_DIRECTION = SignalOnOppositeDirection.EMMIT_IF_STRONG_SIGNAL
 SIGNAL_NEUTRAL = SignalNeutral.CLOSE_IF_PROFITABLE
 
 # AI Model
-FEATURES_SIZE = 2
+FEATURES_SIZE = 3
 HIDDEN_LAYERS = (20)
 # Training Data Size
 MINIMUM_TRAIN_SIZE = 3800
@@ -145,10 +150,10 @@ class CogniTrade(QCAlgorithm):
                 self.log("New Symbol: %s" % s.Symbol)
 
                 self.symbols_universe[s.Symbol] = AssetData(self, s, RESOLUTION,
-                        STOPS_TARGET,
-                        FEATURES_SIZE, STOPS_CHECK_TARGET,
+                        STOPS_TARGET, STOPS_TARGET_STRONG, STRONG_SIGNAL_WEIGHT_MULTIPLIER,
+                        FEATURES_SIZE, STOPS_CHECK_TARGET, 
                         MINIMUM_TRAIN_SIZE, MAXIMUM_TRAIN_SIZE, 
-                        CONFIDENCE_CUTOFF, SIGNAL_TOLERANCE, SIGNAL_EXTREME,
+                        CONFIDENCE_CUTOFF, INDICATOR_CATEGORY_B, INDICATOR_CATEGORY_C,
                         TRAINING_FREQUENCY, SIGNAL_FREQUENCY, 
                         GetModelMLPClassifier(HIDDEN_LAYERS),
                         SIGNAL_SAME_DIRECTION, SIGNAL_OPPOSITE_DIRECTION, SIGNAL_NEUTRAL,

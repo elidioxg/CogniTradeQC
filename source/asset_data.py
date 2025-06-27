@@ -20,24 +20,27 @@ MAX_RW_SIZE = 6000
 SIGNAL_NONE = 1
 SIGNAL_LONG = 2
 SIGNAL_SHORT = 3
+SIGNAL_LONG_STRONG = 4
+SIGNAL_SHORT_STRONG = 5
 
-FEATURE_A = 1 # Flat 
-FEATURE_B = 2 # Positive  
-FEATURE_C = 3 # Negative
-FEATURE_D = 4 # Strong Positive 
-FEATURE_E = 5 # Strong Negative 
-FEATURE_F = 6 # Extreme Positive
-FEATURE_G = 7 # Extreme Negative
+FEATURE_O = 1 # Flat 
+FEATURE_A1 = 2 # Positive
+FEATURE_A2 = 3 # Negative
+FEATURE_B1 = 4 # Strong Positive
+FEATURE_B2 = 5 # Strong Negative
+FEATURE_C1 = 6 # Extreme Positive
+FEATURE_C2 = 7 # Extreme Negative
 
 #endregion
 
 class AssetData(object):
     
     def __init__(self, algorithm:QCAlgorithm, symbol, resolution,
-            stops_target, features_size, 
+            stops_target, stops_target_strong, strong_signal_multiplier,
+            features_size, 
             bar_result, min_train_size,
             max_train_size,
-            confidence, signal_tolerance, signal_extreme,
+            confidence, category_a, category_b,
             training_frequency, signal_frequency, 
             ai_model,
             signal_same_direction, signal_opp_direction, signal_neutral,
@@ -63,15 +66,18 @@ class AssetData(object):
         self.features_size = features_size
         self.bar_result = bar_result
         self.stoptarget = stops_target
+        self.stoptarget_strong = stops_target_strong
         self.profittarget = stops_target
+        self.profittarget_strong = stops_target_strong
+        self.strong_signal_multiplier = strong_signal_multiplier
         self.minimum_train_size = min_train_size
         self.maximum_train_size = max_train_size
         self.confidence = confidence
         self.training_frequency = training_frequency
 
         # AI Signal
-        self.signal_tolerance = signal_tolerance
-        self.signal_extreme = signal_extreme
+        self.indicator_category_a = category_a
+        self.indicator_category_b = category_b
         self.signal_frequency = signal_frequency
     
         # Indicator Parameters
@@ -171,9 +177,9 @@ class AssetData(object):
 
     def Stop(self):
 
+        self.algorithm.log('Removing from Scheduled Events: %s' % self.symbol)
         self.algorithm.schedule.remove(self.event_training)
         self.algorithm.schedule.remove(self.event_predict)
-        self.algorithm.log('Removing %s' % self.symbol)
 
         if self.algorithm.portfolio[self.symbol].invested:
             self.algorithm.log('Closing positions: %s' % self.symbol)
@@ -182,8 +188,7 @@ class AssetData(object):
     def ScheduleTrain(self):
         history = self.algorithm.history[TradeBar](self.symbol, \
                     self.maximum_train_size+self.bar_result,
-                    resolution=self.resolution 
-                    #extendedMarket=False
+                    resolution=self.resolution
                     )
 
         self.reload(history)
@@ -208,12 +213,35 @@ class AssetData(object):
             signal_str = 'Buy'
         elif signal == SIGNAL_SHORT:
             signal_str = 'Sell'
+        elif signal == SIGNAL_LONG_STRONG:
+            signal_str = 'Strong Buy'
+            weight *= self.strong_signal_multiplier
+        elif signal == SIGNAL_SHORT_STRONG:
+            signal_str = 'Strong Sell'
+            weight *= self.strong_signal_multiplier
 
         holdings = self.algorithm.portfolio[self.symbol].quantity
         unpnl = self.algorithm.portfolio[self.symbol].unrealized_profit
 
-        self.algorithm.debug(f'Symbol: {self.symbol} Holdings: {holdings} UnPnL: {unpnl} Signal: {signal_str}  Model Loss: {self.model.loss_} '+
-                             'Training Samples: {self.model.t_} Model Iterations: {self.model.n_iter_}')
+        str_debug1 = ''.join([f'{self.symbol} | {signal_str} | Holdings: {holdings} | UnPnL: {unpnl:.2f} | ',
+                             f'Signal Confidence: {confidence:.2f} | Signal Weight: {weight:.2f} | ',
+                             f'Model Loss: {self.model.loss_:.4f} | Training Samples: {self.model.t_} | Model Iterations: {self.model.n_iter_} | '
+                            ])
+
+        str_debug2 = ''.join([
+                             f'Classes: {self.model.classes_} | Exit Layer Activation : {self.model.out_activation_} | ',
+                             f'Shape First Layer Weights: {self.model.coefs_[0].shape} | Shape First Layer Biases: {self.model.intercepts_[0].shape} | '
+                            ])
+
+        if hasattr(self.model, 'loss_curve_'):
+            str_debug2 = ''.join([str_debug2, 
+                                 f'Loss Curve Lenght: {len(self.model.loss_curve_)} | '
+                                 f'Loss Curve Last Values:{self.model.loss_curve_[-3]:.3f} ,  {self.model.loss_curve_[-2]:.3f} , {self.model.loss_curve_[-1]:.3f} | ', 
+                                ])
+
+        if holdings != 0 and (signal != INVALID and signal != SIGNAL_NONE):
+            self.algorithm.debug(str_debug1)
+            self.algorithm.debug(str_debug2)
 
         if self.model.loss_ >= self.confidence:
             return
@@ -226,10 +254,37 @@ class AssetData(object):
         elif self.resolution == Resolution.DAILY:
             insight_period = timedelta(days=self.bar_result)
 
-        if signal == SIGNAL_LONG:
+        if signal == SIGNAL_NONE:
 
+            # None Signal and Some Position
+            if self.algorithm.portfolio[self.symbol].invested:
+
+                if self.signal_neutral == SignalNeutral.CLOSE_IF_PROFITABLE:
+                    if self.algorithm.portfolio[self.symbol].profit > 0:
+                        self.algorithm.debug(f'Closing Profitable Position: {self.symbol}')
+                        self.algorithm.liquidate(self.symbol)
+                        return
+
+                if self.signal_neutral == SignalNeutral.CLOSE:
+                    self.algorithm.debug(f'Flat Signal Closing Position: {self.symbol}')
+                    self.algorithm.liquidate(self.symbol)
+                    return
+
+                if self.signal_neutral == SignalNeutral.EMMIT_SIGNAL:
+                
+                    self.algorithm.emit_insights(Insight.price(self.symbol,
+                            period=insight_period,
+                            direction=InsightDirection.FLAT, 
+                            confidence=confidence,
+                            weight=weight
+                            ))
+                    return
+
+        elif signal == SIGNAL_LONG:
+
+            # Long Signal and No Position
             if not self.algorithm.portfolio[self.symbol].invested:
-
+                self.algorithm.debug(f'Enter Long: {self.symbol}')
                 self.algorithm.emit_insights(Insight.price(self.symbol,
                     period=insight_period,
                     direction=InsightDirection.UP, 
@@ -238,8 +293,9 @@ class AssetData(object):
                     ))
                 return
             
+            # Long Signal and Long Position
             elif self.algorithm.portfolio[self.symbol].is_long and self.signal_same_direction == SignalOnSameDirection.EMMIT_SIGNAL:
-
+                self.algorithm.debug(f'Increase Long: {self.symbol}')
                 self.algorithm.emit_insights(Insight.price(self.symbol,
                     period=insight_period,
                     direction=InsightDirection.UP, 
@@ -248,9 +304,11 @@ class AssetData(object):
                     ))
                 return
 
+            # Long Signal and Long Position
             elif self.algorithm.portfolio[self.symbol].is_long and self.signal_same_direction == SignalOnSameDirection.EMMIT_IF_NOT_PROFITABLE:
-
+                
                 if self.algorithm.portfolio[self.symbol].profit < 0:
+                    self.algorithm.debug(f'Increase Non-Profitable Long: {self.symbol}')
                     self.algorithm.emit_insights(Insight.price(self.symbol,
                         period=insight_period,
                         direction=InsightDirection.UP, 
@@ -259,13 +317,15 @@ class AssetData(object):
                         ))
                     return
 
+            # Long Signal and Short Position
             elif self.algorithm.portfolio[self.symbol].is_short and self.signal_opp_direction == SignalOnOppositeDirection.CLOSE:
-                self.algorithm.log(f'Closing Position: {self.symbol}')
+                self.algorithm.debug(f'Closing Short: {self.symbol}')
                 self.algorithm.liquidate(self.symbol)
                 return
 
+            # Long Signal and Short Position
             elif self.algorithm.portfolio[self.symbol].is_short and self.signal_opp_direction == SignalOnOppositeDirection.EMMIT_SIGNAL:
-
+                self.algorithm.debug(f'Emmit Long Signal for Short Position: {self.symbol}')
                 self.algorithm.emit_insights(Insight.price(self.symbol,
                         period=insight_period,
                         direction=InsightDirection.DOWN, 
@@ -274,17 +334,18 @@ class AssetData(object):
                         ))
                 return
 
+            # Long Signal and Short Position
             elif self.algorithm.portfolio[self.symbol].is_short and self.signal_opp_direction == SignalOnOppositeDirection.CLOSE_IF_PROFITABLE:
-
                 if self.algorithm.portfolio[self.symbol].profit > 0:
-                    self.algorithm.log(f'Closing Position: {self.symbol}')
+                    self.algorithm.debug(f'Closing Profitable Short: {self.symbol}')
                     self.algorithm.liquidate(self.symbol)
                 return
 
         elif signal == SIGNAL_SHORT:
 
+            # Short Signal and No Position
             if not self.algorithm.portfolio[self.symbol].invested:
-
+                self.algorithm.debug(f'Enter Short: {self.symbol}')
                 self.algorithm.emit_insights(Insight.price(self.symbol,
                         period=insight_period,
                         direction=InsightDirection.DOWN, 
@@ -293,8 +354,9 @@ class AssetData(object):
                         ))
                 return
 
+            # Short Signal and Short Position
             elif self.algorithm.portfolio[self.symbol].is_short and self.signal_same_direction == SignalOnSameDirection.EMMIT_SIGNAL:
-
+                self.algorithm.debug(f'Increase Short: {self.symbol}')
                 self.algorithm.emit_insights(Insight.price(self.symbol,
                         period=insight_period,
                         direction=InsightDirection.DOWN, 
@@ -303,9 +365,10 @@ class AssetData(object):
                         ))
                 return
 
+            # Short Signal and Short Position
             elif self.algorithm.portfolio[self.symbol].is_short and self.signal_same_direction == SignalOnSameDirection.EMMIT_IF_NOT_PROFITABLE:
-
                 if self.algorithm.portfolio[self.symbol].profit < 0:
+                    self.algorithm.debug(f'Increase Non-Profitable Short: {self.symbol}')
                     self.algorithm.emit_insights(Insight.price(self.symbol,
                             period=insight_period,
                             direction=InsightDirection.DOWN, 
@@ -314,13 +377,15 @@ class AssetData(object):
                             ))
                     return
 
+            # Short Signal and Long Position
             elif self.algorithm.portfolio[self.symbol].is_long and self.signal_opp_direction == SignalOnOppositeDirection.CLOSE:
-                self.algorithm.log(f'Closing Position: {self.symbol}')
+                self.algorithm.debug(f'Closing Long: {self.symbol}')
                 self.algorithm.liquidate(self.symbol)
                 return
 
+            # Short Signal and Long Position
             elif self.algorithm.portfolio[self.symbol].is_long and self.signal_opp_direction == SignalOnOppositeDirection.EMMIT_SIGNAL:
-                
+                self.algorithm.debug(f'Emmit Short Signal for Long Position: {self.symbol}')
                 self.algorithm.emit_insights(Insight.price(self.symbol,
                     period=insight_period,
                     direction=InsightDirection.DOWN, 
@@ -329,35 +394,106 @@ class AssetData(object):
                     ))
                 return
 
+            # Short Signal and Long Position
             elif self.algorithm.portfolio[self.symbol].is_long and self.signal_opp_direction == SignalOnOppositeDirection.CLOSE_IF_PROFITABLE:
                 
                 if self.algorithm.portfolio[self.symbol].profit  > 0:
-                    self.algorithm.log(f'Closing Position: {self.symbol}')
+                    self.algorithm.debug(f'Closing Profitable Long: {self.symbol}')
                     self.algorithm.liquidate(self.symbol)
                 return
 
-        elif signal == SIGNAL_NONE:
-
-            if self.algorithm.portfolio[self.symbol].invested:
-
-                if self.algorithm.portfolio[self.symbol].profit > 0 and self.signal_neutral == SignalNeutral.CLOSE_IF_PROFITABLE:
-                    self.algorithm.liquidate(self.symbol)
-                    return
-
-            elif self.algorithm.portfolio[self.symbol].invested:
-                if self.signal_neutral == SignalNeutral.CLOSE:
-                    self.algorithm.log(f'Closing Position: {self.symbol}')
-                    self.algorithm.liquidate(self.symbol)
-                    return
-
-            elif self.signal_neutral == SignalNeutral.EMMIT_SIGNAL:
-                
+        elif signal == SIGNAL_LONG_STRONG:
+            # Strong Long Signal and No Position
+            if not self.algorithm.portfolio[self.symbol].invested:
+                self.algorithm.debug(f'Enter Long (Strong Signal): {self.symbol}')
                 self.algorithm.emit_insights(Insight.price(self.symbol,
+                    period=insight_period,
+                    direction=InsightDirection.UP, 
+                    confidence=confidence,
+                    weight=weight
+                    ))
+                return
+            
+            # Strong Long Signal and Long Position
+            elif self.algorithm.portfolio[self.symbol].is_long and self.signal_same_direction == SignalOnSameDirection.EMMIT_IF_STRONG_SIGNAL:
+                self.algorithm.debug(f'Increase Long (Strong Signal): {self.symbol}')
+                self.algorithm.emit_insights(Insight.price(self.symbol,
+                    period=insight_period,
+                    direction=InsightDirection.UP, 
+                    confidence=confidence,
+                    weight=weight
+                    ))
+                return
+
+            # Strong Long Signal and Long Position (profit < 0)
+            elif self.algorithm.portfolio[self.symbol].is_long and self.signal_same_direction == SignalOnSameDirection.EMMIT_IF_STRONG_SIGNAL_AND_NOT_PROFITABLE:
+
+                if self.algorithm.portfolio[self.symbol].profit < 0:
+                    self.algorithm.debug(f'Increase Long (Strong Signal) for non-profitable position: {self.symbol}')
+                    self.algorithm.emit_insights(Insight.price(self.symbol,
                         period=insight_period,
-                        direction=InsightDirection.FLAT, 
+                        direction=InsightDirection.UP, 
                         confidence=confidence,
                         weight=weight
                         ))
+                    return
+
+            # Strong Long Signal and Short Position
+            elif self.algorithm.portfolio[self.symbol].is_short and self.signal_opp_direction == SignalOnOppositeDirection.EMMIT_IF_STRONG_SIGNAL:
+                self.algorithm.debug(f'Emmit Strong Long Signal for Short Position: {self.symbol}')
+                self.algorithm.emit_insights(Insight.price(self.symbol,
+                        period=insight_period,
+                        direction=InsightDirection.DOWN, 
+                        confidence=confidence,
+                        weight=weight
+                        ))
+                return
+
+        elif signal == SIGNAL_SHORT_STRONG:
+            # Strong Short Signal and No Position
+            if not self.algorithm.portfolio[self.symbol].invested:
+                self.algorithm.debug(f'Enter Short (Strong Signal): {self.symbol}')
+                self.algorithm.emit_insights(Insight.price(self.symbol,
+                        period=insight_period,
+                        direction=InsightDirection.DOWN, 
+                        confidence=confidence,
+                        weight=weight
+                        ))
+                return
+
+            # Strong Short Signal and Short Position
+            elif self.algorithm.portfolio[self.symbol].is_short and self.signal_same_direction == SignalOnSameDirection.EMMIT_IF_STRONG_SIGNAL:
+                self.algorithm.debug(f'Increase Short (Strong Signal): {self.symbol}')
+                self.algorithm.emit_insights(Insight.price(self.symbol,
+                        period=insight_period,
+                        direction=InsightDirection.DOWN, 
+                        confidence=confidence,
+                        weight=weight
+                        ))
+                return
+
+            # Strong Short Signal and Short Position (profit < 0)
+            elif self.algorithm.portfolio[self.symbol].is_short and self.signal_same_direction == SignalOnSameDirection.EMMIT_IF_STRONG_SIGNAL_AND_NOT_PROFITABLE:
+
+                if self.algorithm.portfolio[self.symbol].profit < 0:
+                    self.algorithm.debug(f'Increase Short (Strong Signal) for non-profitable position: {self.symbol}')
+                    self.algorithm.emit_insights(Insight.price(self.symbol,
+                            period=insight_period,
+                            direction=InsightDirection.DOWN, 
+                            confidence=confidence,
+                            weight=weight
+                            ))
+                    return
+
+            # Strong Short Signal and Long Position
+            elif self.algorithm.portfolio[self.symbol].is_long and self.signal_opp_direction == SignalOnOppositeDirection.EMMIT_IF_STRONG_SIGNAL:
+                self.algorithm.debug(f'Emmit Strong Short Signal for Long Position: {self.symbol}')
+                self.algorithm.emit_insights(Insight.price(self.symbol,
+                    period=insight_period,
+                    direction=InsightDirection.DOWN, 
+                    confidence=confidence,
+                    weight=weight
+                    ))
                 return
    
     def reload(self, history):
@@ -369,7 +505,6 @@ class AssetData(object):
         self.ma_slow = ExponentialMovingAverage(self.ma_slow_period)
         self.psar = ParabolicStopAndReverse(self.sar_start, self.sar_step, self.sar_max)
         self.atr = AverageTrueRange(self.atr_period, MovingAverageType.SIMPLE)
-
 
         # Clear rolling windows
         self.rwClose.reset()
@@ -474,9 +609,17 @@ class AssetData(object):
     def getResultBar(self, n):
         sl = dc.Decimal(self.rwClose[n]) * (dc.Decimal(1) - dc.Decimal(self.stoptarget))
         tp = dc.Decimal(self.rwClose[n]) * (dc.Decimal(1) + dc.Decimal(self.profittarget))
+        sl_strong = dc.Decimal(self.rwClose[n]) * (dc.Decimal(1) - dc.Decimal(self.stoptarget_strong))
+        tp_strong = dc.Decimal(self.rwClose[n]) * (dc.Decimal(1) + dc.Decimal(self.profittarget_strong))
         
-        for i in range(0, self.bar_result, 1): # self.bar_result+1??
-            if self.rwClose[n-i] >= tp:
+        for i in range(0, self.bar_result, 1):
+            if self.rwClose[n-i] >= tp_strong:
+                return(SIGNAL_LONG_STRONG)
+
+            elif self.rwClose[n-i] <= sl_strong:
+                return(SIGNAL_SHORT_STRONG)
+
+            elif self.rwClose[n-i] >= tp:
                 return(SIGNAL_LONG)
                 
             elif self.rwClose[n-i] <= sl:
@@ -486,155 +629,161 @@ class AssetData(object):
         
     def getBBFeature(self, n):
 
-        if self.rwClose[n] > self.rwBBUpper[n] * (1 + self.signal_extreme):
-            return(FEATURE_F)
+        if self.rwClose[n] > self.rwBBUpper[n] * (1 + self.indicator_category_b):
+            return(FEATURE_C1)
             
-        elif self.rwClose[n] <  self.rwBBLower[n] * (1 - self.signal_extreme):
-            return(FEATURE_G)
+        elif self.rwClose[n] <  self.rwBBLower[n] * (1 - self.indicator_category_b):
+            return(FEATURE_C2)
 
-        elif self.rwClose[n] > self.rwBBUpper[n] * (1 + self.signal_tolerance):
-            return(FEATURE_D)
+        elif self.rwClose[n] > self.rwBBUpper[n] * (1 + self.indicator_category_a):
+            return(FEATURE_B1)
             
-        elif self.rwClose[n] <  self.rwBBLower[n] * (1 - self.signal_tolerance):
-            return(FEATURE_E)
+        elif self.rwClose[n] <  self.rwBBLower[n] * (1 - self.indicator_category_a):
+            return(FEATURE_B2)
 
         elif self.rwClose[n] > self.rwBBUpper[n]:
-            return(FEATURE_B)
+            return(FEATURE_A1)
             
         elif self.rwClose[n] < self.rwBBLower[n]:
-            return(FEATURE_C)
+            return(FEATURE_A2)
             
         else:
-            return(FEATURE_A)
+            return(FEATURE_O)
     
     def getRsiFeature(self, n):
 
         if self.rwRSI[n] > self.rsi_extreme_oversold:
-            return(FEATURE_D)
+            return(FEATURE_C1)
             
         elif self.rwRSI[n] < self.rsi_extreme_overbought:
-            return(FEATURE_E)
+            return(FEATURE_C2)
 
         elif self.rwRSI[n] > self.rsi_oversold:
-            return(FEATURE_B)
+            return(FEATURE_B1)
             
         elif self.rwRSI[n] < self.rsi_overbought:
-            return(FEATURE_C)
+            return(FEATURE_B2)
+
+        elif self.rwRSI[n] > 50:
+            return(FEATURE_A1)
+            
+        elif self.rwRSI[n] < 50:
+            return(FEATURE_A2)
             
         else:
-            return(FEATURE_A)
+            return(FEATURE_O)
     
     def getMAFastFeature(self, n):
         
-        if self.rwMAFast[n] > self.rwClose[n] * (1 + self.signal_extreme):
-            return(FEATURE_F)
+        if self.rwMAFast[n] > self.rwClose[n] * (1 + self.indicator_category_b):
+            return(FEATURE_C1)
             
-        elif self.rwMAFast[n] < self.rwClose[n] * (1 - self.signal_extreme):
-            return(FEATURE_G)
+        elif self.rwMAFast[n] < self.rwClose[n] * (1 - self.indicator_category_b):
+            return(FEATURE_C2)
 
-        elif self.rwMAFast[n] > self.rwClose[n] * (1 + self.signal_tolerance):
-            return(FEATURE_D)
+        elif self.rwMAFast[n] > self.rwClose[n] * (1 + self.indicator_category_a):
+            return(FEATURE_B1)
             
-        elif self.rwMAFast[n] < self.rwClose[n] * (1 - self.signal_tolerance):
-            return(FEATURE_E)
+        elif self.rwMAFast[n] < self.rwClose[n] * (1 - self.indicator_category_a):
+            return(FEATURE_B2)
 
         elif self.rwMAFast[n] > self.rwClose[n]:
-            return(FEATURE_B)
+            return(FEATURE_A1)
             
         elif self.rwMAFast[n] < self.rwClose[n]:
-            return(FEATURE_C)
+            return(FEATURE_A2)
 
         else:
-            return(FEATURE_A)
+            return(FEATURE_O)
     
     def getMASlowFeature(self, n):
 
-        if self.rwMASlow[n] > self.rwClose[n] * (1 + self.signal_extreme):
-            return(FEATURE_F)
+        if self.rwMASlow[n] > self.rwClose[n] * (1 + self.indicator_category_b):
+            return(FEATURE_C1)
             
-        elif self.rwMASlow[n] < self.rwClose[n] * (1 - self.signal_extreme):
-            return(FEATURE_G)
+        elif self.rwMASlow[n] < self.rwClose[n] * (1 - self.indicator_category_b):
+            return(FEATURE_C2)
         
-        elif self.rwMASlow[n] > self.rwClose[n] * (1 + self.signal_tolerance):
-            return(FEATURE_D)
+        elif self.rwMASlow[n] > self.rwClose[n] * (1 + self.indicator_category_a):
+            return(FEATURE_B1)
             
-        elif self.rwMASlow[n] < self.rwClose[n] * (1 - self.signal_tolerance):
-            return(FEATURE_E)
+        elif self.rwMASlow[n] < self.rwClose[n] * (1 - self.indicator_category_a):
+            return(FEATURE_B2)
 
         elif self.rwMASlow[n] > self.rwClose[n]:
-            return(FEATURE_B)
+            return(FEATURE_A1)
             
         elif self.rwMASlow[n] < self.rwClose[n]:
-            return(FEATURE_C)
+            return(FEATURE_A2)
 
         else:
-            return(FEATURE_A)
+            return(FEATURE_O)
 
     def getAtrFeature(self, n):
 
-        if self.rwAtr[n] > self.rwAtr[n+1] * (1 + self.signal_extreme):
-            return(FEATURE_F)
+        if self.rwAtr[n] > self.rwAtr[n+1] * (1 + self.indicator_category_b):
+            return(FEATURE_C1)
             
-        elif self.rwAtr[n] < self.rwAtr[n+1] * (1 - self.signal_extreme):
-            return(FEATURE_G)
+        elif self.rwAtr[n] < self.rwAtr[n+1] * (1 - self.indicator_category_b):
+            return(FEATURE_C2)
         
-        elif self.rwAtr[n] > self.rwAtr[n+1] * (1 + self.signal_tolerance):
-            return(FEATURE_D)
+        elif self.rwAtr[n] > self.rwAtr[n+1] * (1 + self.indicator_category_a):
+            return(FEATURE_B1)
             
-        elif self.rwAtr[n] < self.rwAtr[n+1] * (1 - self.signal_tolerance):
-            return(FEATURE_E)
+        elif self.rwAtr[n] < self.rwAtr[n+1] * (1 - self.indicator_category_a):
+            return(FEATURE_B2)
 
         elif self.rwAtr[n] > self.rwAtr[n+1]:
-            return(FEATURE_B)
+            return(FEATURE_A1)
             
         elif self.rwAtr[n] < self.rwAtr[n+1]:
-            return(FEATURE_C)
+            return(FEATURE_A2)
 
         else:
-            return(FEATURE_A)
+            return(FEATURE_O)
 
     def getTrFeature(self, n):
 
-        if self.rwTr[n] > self.rwTr[n+1] * (1 + self.signal_extreme):
-            return(FEATURE_F)
+        if self.rwTr[n] > self.rwTr[n+1] * (1 + self.indicator_category_b):
+            return(FEATURE_C1)
             
-        elif self.rwTr[n] < self.rwTr[n+1] * (1 - self.signal_extreme):
-            return(FEATURE_G)
+        elif self.rwTr[n] < self.rwTr[n+1] * (1 - self.indicator_category_b):
+            return(FEATURE_C2)
         
-        elif self.rwTr[n] > self.rwTr[n+1] * (1 + self.signal_tolerance):
-            return(FEATURE_D)
+        elif self.rwTr[n] > self.rwTr[n+1] * (1 + self.indicator_category_a):
+            return(FEATURE_B1)
             
-        elif self.rwTr[n] < self.rwTr[n+1] * (1 - self.signal_tolerance):
-            return(FEATURE_E)
+        elif self.rwTr[n] < self.rwTr[n+1] * (1 - self.indicator_category_a):
+            return(FEATURE_B2)
 
         elif self.rwTr[n] > self.rwTr[n+1]:
-            return(FEATURE_B)
+            return(FEATURE_A1)
             
         elif self.rwTr[n] < self.rwTr[n+1]:
-            return(FEATURE_C)
+            return(FEATURE_A2)
 
         else:
-            return(FEATURE_A)
+            return(FEATURE_O)
             
     def getPSarFeature(self, n):
         
-        if self.rwPSar[n] > self.rwClose[n] * (1 + self.signal_extreme):
-            return(FEATURE_F)
+        if self.rwPSar[n] > self.rwClose[n] * (1 + self.indicator_category_b):
+            return(FEATURE_C1)
             
-        elif self.rwPSar[n] < self.rwClose[n] * (1 - self.signal_extreme):
-            return(FEATURE_G)
+        elif self.rwPSar[n] < self.rwClose[n] * (1 - self.indicator_category_b):
+            return(FEATURE_C2)
 
-        elif self.rwPSar[n] > self.rwClose[n] * (1 + self.signal_tolerance):
-            return(FEATURE_D)
+        elif self.rwPSar[n] > self.rwClose[n] * (1 + self.indicator_category_a):
+            return(FEATURE_B1)
             
-        elif self.rwPSar[n] < self.rwClose[n] * (1 - self.signal_tolerance):
-            return(FEATURE_E)
+        elif self.rwPSar[n] < self.rwClose[n] * (1 - self.indicator_category_a):
+            return(FEATURE_B2)
 
         elif self.rwPSar[n] > self.rwClose[n]:
-            return(FEATURE_B)
+            return(FEATURE_A1)
             
         elif self.rwPSar[n] < self.rwClose[n]:
-            return(FEATURE_C)
+            return(FEATURE_A2)
 
         else:
-            return(FEATURE_A)
+            return(FEATURE_O)

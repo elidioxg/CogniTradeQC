@@ -24,24 +24,24 @@ MAX_DRAWDOWN_PORTFOLIO = 0 # (0 = disabled)
 
 # Portfolio Construction
 PORTFOLIO_CONSTRUCTOR = PortfolioConstructor.INSIGHT_WEIGHTING
-MAX_HOLDINGS = 0.2
+MAX_WEIGHT = 0.5
 LEVERAGE = 1
 
 # Orders
 ORDER_EXECUTION = OrderExecutionType.IMMEDIATE
 
 # Training
-TRAINING_FREQUENCY = TrainingFrequency.DAILY
+TRAINING_FREQUENCY = TrainingFrequency.WEEKLY
 STOPS_CHECK_TARGET = 2 # How many bars to check TP and SL target
-STOPS_TARGET = 0.01 # TP and SL target to train the model
+STOPS_TARGET = 0.005 # TP and SL target to train the model
 
 # Training Strong Signals
-STOPS_TARGET_STRONG = 0.02 # TP and SL target to train the model
+STOPS_TARGET_STRONG = 0.01 # TP and SL target to train the model
 STRONG_SIGNAL_WEIGHT_MULTIPLIER = 1.5
 
 # Signal
 SIGNAL_FREQUENCY = SignalCheckFrequency.AFTER_MARKET_OPEN
-CONFIDENCE_CUTOFF = 0.5
+CONFIDENCE_CUTOFF = 2
 
 # Indicator Category Model Classification
 INDICATOR_CATEGORY_B = 0.01
@@ -73,7 +73,7 @@ class CogniTrade(QCAlgorithm):
         self.set_benchmark(BENCHMARK)
         self.set_brokerage_model(BrokerageName.ALPHA_STREAMS)
 
-        # Universe Selection
+        # Universe Selection)
         self.set_universe_selection(TechnologyETFUniverse())
         self.universe_settings.resolution = Resolution.DAILY
         self.universe_settings.minimum_time_in_universe = dt.timedelta(days=7)
@@ -97,7 +97,7 @@ class CogniTrade(QCAlgorithm):
             self.set_portfolio_construction(
                 AccumulativeInsightPortfolioConstructionModel(
                 Resolution.DAILY, PortfolioBias.LONG_SHORT,
-                MAX_HOLDINGS
+                MAX_WEIGHT
                 ))
 
         elif PORTFOLIO_CONSTRUCTOR == PortfolioConstructor.CONFIDENCE_WEIGHTED:
@@ -139,7 +139,8 @@ class CogniTrade(QCAlgorithm):
     def OnOrderEvent(self, orderEvent):
         order = self.transactions.get_order_by_id(orderEvent.order_id)
         if orderEvent.status == OrderStatus.FILLED:
-            self.debug(f"{self.time}: {order.type}: {orderEvent}")
+            #self.debug(f'{self.time} | {order.symbol} | {order.direction} | {order.type} | {order.price:.2f} | {order.absolute_quantity} | ')
+            self.debug(f'{orderEvent}')
 
     # Initializing Universe Securities
     def OnSecuritiesChanged(self, changes):
@@ -157,7 +158,7 @@ class CogniTrade(QCAlgorithm):
                         TRAINING_FREQUENCY, SIGNAL_FREQUENCY, 
                         GetModelMLPClassifier(HIDDEN_LAYERS),
                         SIGNAL_SAME_DIRECTION, SIGNAL_OPPOSITE_DIRECTION, SIGNAL_NEUTRAL,
-                        MAX_HOLDINGS)
+                        MAX_WEIGHT)
 
         for s in changes.RemovedSecurities:
             

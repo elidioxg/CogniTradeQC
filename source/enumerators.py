@@ -3,6 +3,11 @@ from AlgorithmImports import *
 from enum import Enum
 #endregion
 
+SIGNAL_NONE = 1
+SIGNAL_LONG = 2
+SIGNAL_SHORT = 3
+SIGNAL_LONG_STRONG = 4
+SIGNAL_SHORT_STRONG = 5
 
 #region enums
 class SignalOnSameDirection(Enum):
@@ -54,6 +59,3 @@ class OrderExecutionType(Enum):
     VOLUME_WEIGHTED_AVERAGE_PRICE = 2
 
 #endregion
-
-
-
